@@ -2,6 +2,8 @@ import asyncio
 import functools
 import json
 import logging
+import logging.handlers
+import os
 import random
 import time
 from typing import Optional
@@ -88,7 +90,7 @@ def shorten_address(addr: str) -> str:
 
 
 def setup_logging(level: Optional[str] = None, json_format: Optional[bool] = None):
-    """Configure structured JSON logging for the agent."""
+    """Configure structured JSON logging with stdout + rotating file handler."""
     level = level or settings.LOG_LEVEL
     use_json = json_format if json_format is not None else settings.LOG_FORMAT_JSON
 
@@ -98,24 +100,30 @@ def setup_logging(level: Optional[str] = None, json_format: Optional[bool] = Non
     if root.handlers:
         return
 
-    handler = logging.StreamHandler()
+    class JsonFormatter(logging.Formatter):
+        def format(self, record):
+            log_obj = {
+                "ts": self.formatTime(record, self.datefmt),
+                "level": record.levelname,
+                "logger": record.name,
+                "msg": record.getMessage(),
+            }
+            if record.exc_info and record.exc_info[0] is not None:
+                log_obj["exception"] = self.formatException(record.exc_info)
+            return json.dumps(log_obj)
 
-    if use_json:
-        class JsonFormatter(logging.Formatter):
-            def format(self, record):
-                log_obj = {
-                    "ts": self.formatTime(record, self.datefmt),
-                    "level": record.levelname,
-                    "logger": record.name,
-                    "msg": record.getMessage(),
-                }
-                if record.exc_info and record.exc_info[0] is not None:
-                    log_obj["exception"] = self.formatException(record.exc_info)
-                return json.dumps(log_obj)
-        handler.setFormatter(JsonFormatter())
-    else:
-        handler.setFormatter(
-            logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
-        )
+    text_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+    json_formatter = JsonFormatter()
 
-    root.addHandler(handler)
+    stdout_handler = logging.StreamHandler()
+    stdout_handler.setFormatter(json_formatter if use_json else text_formatter)
+    root.addHandler(stdout_handler)
+
+    os.makedirs(settings.LOG_DIR, exist_ok=True)
+    file_handler = logging.handlers.RotatingFileHandler(
+        settings.LOG_DIR / "savage.log",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+    )
+    file_handler.setFormatter(json_formatter)
+    root.addHandler(file_handler)
