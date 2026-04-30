@@ -1,0 +1,20 @@
+{
+  "known_ruggers": [],
+  "flagged_patterns": [
+    {
+      "pattern": "rapid_lp_removal",
+      "description": "LP removed within 30 minutes of token launch",
+      "severity": "critical"
+    },
+    {
+      "pattern": "mint_authority_abuse",
+      "description": "Mint authority used to inflate supply after launch",
+      "severity": "critical"
+    },
+    {
+      "pattern": "dev_dump",
+      "description": "Dev wallet sold >20% of holdings within first hour",
+      "severity": "high"
+    }
+  ]
+}
