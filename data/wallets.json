@@ -1,0 +1,16 @@
+{
+  "tracked_wallets": [
+    {
+      "address": "EXAMPLE_WALLET_ADDRESS_1",
+      "label": "alpha-trader-1",
+      "weight": 1.0,
+      "notes": "Consistently early on 5-10x plays"
+    },
+    {
+      "address": "EXAMPLE_WALLET_ADDRESS_2",
+      "label": "whale-degen",
+      "weight": 1.0,
+      "notes": "High volume, 60% win rate"
+    }
+  ]
+}
