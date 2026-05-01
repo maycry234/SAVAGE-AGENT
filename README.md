@@ -49,14 +49,13 @@ cd SAVAGE-AGENT
 
 # 2. Configure
 cp .env.example .env
-# Fill in HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-# and either ENCRYPTION_KEY + TRADER_WALLET_KEY (encrypted)
-# or TRADER_WALLET_PRIVATE_KEY (base58, less secure)
+# Fill in HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+# DRY_RUN=true is the default — no wallet needed for paper trading
 
 # 3. Add tracked wallets
 # Edit data/wallets.json with wallet addresses to monitor
 
-# 4. Run
+# 4. Run (starts in paper-trading mode by default)
 docker compose up -d
 docker compose logs -f
 ```
@@ -67,6 +66,14 @@ docker compose logs -f
 
 | Variable | Description | Default | Required |
 |---|---|---|---|
+| `DRY_RUN` | Paper-trading mode (no real swaps) | `true` | No |
+| `DRY_RUN_STARTING_SOL` | Starting paper balance (SOL) | `25.0` | No |
+| `DRY_RUN_EXECUTION_DELAY_MS` | Simulated execution latency (ms) | `250` | No |
+| `DRY_RUN_SLIPPAGE_BPS` | Simulated slippage (bps) | `SLIPPAGE_BPS` | No |
+| `STARTUP_HEALTHCHECK_REQUIRED` | Run health checks on startup | `true` | No |
+| `REQUIRE_TRADING_WALLET` | Require wallet even in dry-run | `false` | No |
+| `REQUIRE_GROK` | Require Grok API key | `false` | No |
+| `HEALTH_CHECK_TIMEOUT` | Health check timeout (seconds) | `8.0` | No |
 | `HELIUS_API_KEY` | Helius API key for RPC + WebSocket | — | **Yes** |
 | `TELEGRAM_BOT_TOKEN` | Telegram bot token for alerts | — | **Yes** |
 | `TELEGRAM_CHAT_ID` | Telegram chat ID for alerts | — | **Yes** |
@@ -142,7 +149,54 @@ docker compose logs -f
 | `LOG_FORMAT_JSON` | Use JSON log format | `true` | No |
 | `DAILY_SUMMARY_HOUR` | UTC hour for daily summary | `0` | No |
 
-\* Either `ENCRYPTION_KEY` + `TRADER_WALLET_KEY` or `TRADER_WALLET_PRIVATE_KEY` is required.
+\* Either `ENCRYPTION_KEY` + `TRADER_WALLET_KEY` or `TRADER_WALLET_PRIVATE_KEY` is required for live trading (`DRY_RUN=false`).
+
+---
+
+## VPS Burn-in (Paper Trading)
+
+Before funding a VPS with real SOL, run the agent in paper-trading mode for 24–72 hours to validate configuration, signal quality, and system stability.
+
+### How it works
+
+1. **Default safe**: `DRY_RUN=true` is the default. No private key, encryption key, or wallet config needed.
+2. **Full pipeline**: All signal ingestion (wallet tracking, crawlers, Helius WS), token scoring, and alerting work identically to live mode.
+3. **Paper ledger**: Buys and sells are recorded in `paper_ledger` (SQLite) with simulated tx signatures (`DRYRUN_BUY_<ts>_<addr>`, `DRYRUN_SELL_<ts>_<addr>`). Open positions use `dry_run=1` and `simulated_tx_signature` columns.
+4. **Paper balance**: Starts at `DRY_RUN_STARTING_SOL` (default 25 SOL). Each paper buy deducts SOL; each paper sell credits SOL. Query with `ExecutionEngine.get_paper_balance()`.
+5. **Telegram alerts**: Play alerts include a `🧪 DRY RUN` prefix so you can distinguish paper trades from live ones.
+6. **Startup health checks**: Before any trading loop starts, the agent verifies connectivity to Helius RPC, Helius REST, DexScreener, Jupiter, Telegram, and optionally Grok. Required checks must pass or the agent refuses to start.
+
+### Health checks
+
+| Check | What it verifies | Required? |
+|---|---|---|
+| `helius_rpc` | JSON-RPC `getHealth` call | Yes |
+| `helius_rest` | REST API reachable | Yes |
+| `dexscreener` | Token data endpoint returns pairs | Yes |
+| `jupiter` | WSOL→USDC quote succeeds | Yes |
+| `telegram` | Bot `getMe` call | Yes |
+| `grok` | `/models` endpoint | Only if `REQUIRE_GROK=true` |
+| `wallet` | Key material exists | Only if `DRY_RUN=false` or `REQUIRE_TRADING_WALLET=true` |
+
+### Going live
+
+After a successful burn-in:
+
+```bash
+# 1. Stop the agent
+docker compose down
+
+# 2. Update .env
+DRY_RUN=false
+ENCRYPTION_KEY=your_fernet_key
+TRADER_WALLET_KEY=your_encrypted_private_key
+# OR: TRADER_WALLET_PRIVATE_KEY=your_base58_key
+
+# 3. Restart
+docker compose up -d
+```
+
+The agent will run startup health checks (including wallet verification) and begin live trading.
 
 ---
 

@@ -15,6 +15,7 @@ from agent.ct_motion import CTMotionDetector
 from agent.crawlers import PlatformCrawlers
 from agent.learning import LearningEngine
 from agent.alerts import AlertManager
+from agent.health import HealthChecker
 from agent.utils import setup_logging
 
 logger = logging.getLogger("savage.main")
@@ -38,15 +39,37 @@ class SavageAgent:
         self._running = False
 
     async def start(self):
-        logger.info("SAVAGE AGENT starting up...")
+        mode = "DRY_RUN" if settings.DRY_RUN else "LIVE"
+        logger.info("SAVAGE AGENT starting up... mode=%s", mode)
 
         settings.validate()
 
         await init_all()
         logger.info("databases initialized")
 
+        if settings.STARTUP_HEALTHCHECK_REQUIRED:
+            checker = HealthChecker()
+            report = await checker.run_all()
+            for r in report.results:
+                status = "OK" if r.ok else "FAIL"
+                req_tag = "required" if r.required else "optional"
+                logger.info(
+                    "health %-16s %s  %6.0fms  %s  [%s]",
+                    r.name, status, r.latency_ms, r.details, req_tag,
+                )
+            if not report.ok:
+                failed = [r.name for r in report.results if not r.ok and r.required]
+                raise RuntimeError(
+                    f"Startup health checks failed: {', '.join(failed)}. "
+                    "Fix configuration or set STARTUP_HEALTHCHECK_REQUIRED=false to skip."
+                )
+            logger.info("all startup health checks passed")
+
         await self.execution.initialize()
-        logger.info("trading wallet loaded: %s", self.execution._keypair.pubkey())
+        if self.execution._keypair:
+            logger.info("trading wallet loaded: %s", self.execution._keypair.pubkey())
+        elif settings.DRY_RUN:
+            logger.info("running in DRY_RUN mode without wallet")
 
         await self.token_intel.initialize()
 
@@ -64,11 +87,16 @@ class SavageAgent:
         ]
 
         logger.info(
-            "all systems online. tracking %d wallets. buy threshold: %d, max positions: %d",
+            "all systems online. mode=%s tracking %d wallets. buy threshold: %d, max positions: %d",
+            mode,
             len(self.wallet_tracker.tracked_wallets),
             settings.BUY_SCORE_THRESHOLD,
             settings.MAX_CONCURRENT_POSITIONS,
         )
+
+        if settings.DRY_RUN:
+            balance = await self.execution.get_paper_balance()
+            logger.info("paper trading balance: %.4f SOL (starting=%.1f)", balance, settings.DRY_RUN_STARTING_SOL)
 
         try:
             await asyncio.gather(*self._tasks)
@@ -180,8 +208,9 @@ class SavageAgent:
                 entry_price=result.entry_price,
                 tp_price=result.entry_price * settings.INITIAL_TP_MULTIPLIER,
                 sl_price=result.entry_price * (1 - settings.INITIAL_SL_PERCENT),
+                dry_run=result.simulated,
             )
-            logger.info("position opened: %s @ %s — %.1f SOL", score.symbol, result.entry_price, sol_size)
+            logger.info("position opened: %s @ %s — %.1f SOL%s", score.symbol, result.entry_price, sol_size, " [DRY RUN]" if result.simulated else "")
         else:
             logger.error("buy failed for %s: %s", score.symbol, result.error)
 
