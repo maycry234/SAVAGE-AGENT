@@ -220,6 +220,60 @@ The agent will run startup health checks (including wallet verification) and beg
 
 **Crypto Utils** (`agent/crypto_utils.py`) — Fernet-based encryption/decryption for wallet private key storage.
 
+**Operator CLI** (`agent/cli.py`) — Production operator CLI for VPS management over SSH. Supports wallet encryption, health checks, position/trade inspection, paper ledger management, and manual position control.
+
+---
+
+## Operator CLI
+
+Manage your VPS deployment over SSH without editing SQLite by hand.
+
+```bash
+# Generate a Fernet encryption key
+python -m agent.cli generate-key
+
+# Encrypt a wallet private key (from file or inline)
+python -m agent.cli encrypt-wallet --private-key ./wallet.txt --key "$ENCRYPTION_KEY"
+python -m agent.cli encrypt-wallet --private-key <base58_key>
+
+# Run health checks (nonzero exit if required checks fail)
+python -m agent.cli health
+
+# Inspect open positions
+python -m agent.cli positions
+python -m agent.cli positions --json
+
+# View recent completed trades
+python -m agent.cli trades --limit 10
+python -m agent.cli trades --json
+
+# Paper-trading balance and stats
+python -m agent.cli paper-balance
+
+# Reset paper ledger (requires confirmation)
+python -m agent.cli reset-paper --confirm RESET
+
+# Force-close a position
+python -m agent.cli force-close --token <mint> --percent 100 --reason manual_exit
+python -m agent.cli force-close --token <mint> --percent 50 --reason partial_exit --live
+
+# Tail the learning log
+python -m agent.cli tail-learning --lines 100
+```
+
+**Docker one-shot usage:**
+
+```bash
+docker compose run --rm savage-agent python -m agent.cli health
+docker compose run --rm savage-agent python -m agent.cli positions
+docker compose run --rm savage-agent python -m agent.cli paper-balance
+```
+
+**Safety:**
+- `force-close` on live positions requires both `--live` flag and `DRY_RUN=false`.
+- `encrypt-wallet` never prints the plaintext private key.
+- `reset-paper` requires `--confirm RESET` and never touches real trade history.
+
 ---
 
 ## Scoring Engine
