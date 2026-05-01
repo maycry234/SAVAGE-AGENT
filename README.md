@@ -1,5 +1,7 @@
 # SAVAGE AGENT
 
+![CI](https://github.com/maycry234/SAVAGE-AGENT/actions/workflows/ci.yml/badge.svg)
+
 Autonomous Solana memecoin trading agent. Monitors tracked wallets for convergent ape activity, scores tokens across four dimensions, and executes trades autonomously via Jupiter V6.
 
 ```
@@ -403,6 +405,32 @@ See `data/SOUL.md` for the complete rule set.
 - Monitors BTC/SOL price via DexScreener
 - If BTC drops > 3% in 1 hour, adds +10 to effective threshold
 - Automatically reverts when conditions normalize
+
+---
+
+## VPS Deployment — Quick Path
+
+```bash
+# On a fresh Ubuntu 22.04/24.04 VPS
+curl -fsSL https://get.docker.com | sh
+git clone https://github.com/maycry234/SAVAGE-AGENT.git && cd SAVAGE-AGENT
+cp .env.example .env          # fill HELIUS_API_KEY, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+
+# Health check
+docker compose run --rm savage-agent python -m agent.cli health
+
+# Start in paper-trading mode (DRY_RUN=true is the default)
+docker compose up -d --build
+docker compose logs -f savage-agent
+
+# Monitor paper trading
+docker compose run --rm savage-agent python -m agent.cli paper-balance
+docker compose run --rm savage-agent python -m agent.cli positions
+```
+
+After 24–72 hours of clean paper trading, follow the live switch checklist in **[docs/VPS_DEPLOY.md](docs/VPS_DEPLOY.md)**.
+
+See also: **[docs/PRODUCTION_CHECKLIST.md](docs/PRODUCTION_CHECKLIST.md)** — pre-live and post-live verification items.
 
 ---
 
