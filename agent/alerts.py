@@ -38,11 +38,13 @@ class AlertManager:
         vol_1h: float, liquidity: float, holders: int,
         holder_growth: float, dev_status: str, distro_score: int,
         entry_price: float, tp_price: float, sl_price: float,
+        dry_run: bool = False,
     ):
         addr_short = shorten_address(token_address)
         dev_icon = "\u2705" if dev_status == "CLEAN" else "\u26a0\ufe0f"
+        title_prefix = "\U0001f9ea DRY RUN \u2014 " if dry_run else ""
         text = (
-            f"\U0001f3af PLAY DETECTED \u2014 ${symbol}\n"
+            f"{title_prefix}\U0001f3af PLAY DETECTED \u2014 ${symbol}\n"
             f"`{addr_short}`\n\n"
             f"apes: {ape_count} wallets (\u26a1 within {window_secs}s)\n"
             f"score: {score}/100  \u2022  size: {sol_size} SOL\n"

@@ -1,6 +1,11 @@
+import json
+import logging
+
 import aiosqlite
 from config import settings
 import os
+
+logger = logging.getLogger("savage.db")
 
 
 async def get_db(db_name: str = "trades.db") -> aiosqlite.Connection:
@@ -163,9 +168,44 @@ async def init_trades_db():
             "ON crawler_signals(token_address, detected_at)"
         )
 
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS paper_ledger (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_type TEXT NOT NULL,
+                token_address TEXT,
+                token_symbol TEXT,
+                sol_delta REAL NOT NULL,
+                token_delta REAL DEFAULT 0,
+                simulated_price REAL,
+                reason TEXT,
+                metadata TEXT,
+                created_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_ledger_token "
+            "ON paper_ledger(token_address, created_at)"
+        )
+
+        await _add_column_if_missing(db, "open_positions", "dry_run", "INTEGER DEFAULT 0")
+        await _add_column_if_missing(db, "open_positions", "simulated_tx_signature", "TEXT")
+        await _add_column_if_missing(db, "completed_trades", "dry_run", "INTEGER DEFAULT 0")
+        await _add_column_if_missing(db, "completed_trades", "simulated_tx_signature", "TEXT")
+
         await db.commit()
     finally:
         await db.close()
+
+
+async def _add_column_if_missing(
+    db: aiosqlite.Connection, table: str, column: str, column_def: str
+):
+    cursor = await db.execute(f"PRAGMA table_info({table})")
+    rows = await cursor.fetchall()
+    existing = {r[1] if isinstance(r, tuple) else r["name"] for r in rows}
+    if column not in existing:
+        await db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_def}")
+        logger.info("migrated %s.%s (%s)", table, column, column_def)
 
 
 async def init_learning_db():

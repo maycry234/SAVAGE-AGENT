@@ -1,5 +1,11 @@
 version: '3.8'
 
+# One-shot CLI usage (does not start the long-running agent):
+#   docker compose run --rm savage-agent python -m agent.cli health
+#   docker compose run --rm savage-agent python -m agent.cli positions
+#   docker compose run --rm savage-agent python -m agent.cli paper-balance
+#   docker compose run --rm savage-agent python -m agent.cli generate-key
+
 services:
   savage-agent:
     build: .
@@ -15,9 +21,9 @@ services:
       - PYTHONUNBUFFERED=1
       - PYTHONPATH=/app
     healthcheck:
-      test: ["CMD", "python", "-c", "import sys; sys.exit(0)"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD", "python", "-m", "agent.cli", "health"]
+      interval: 60s
+      timeout: 30s
       retries: 3
     deploy:
       resources:

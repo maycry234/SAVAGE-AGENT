@@ -137,6 +137,16 @@ TRADER_WALLET_KEY = os.getenv("TRADER_WALLET_KEY", "")
 # === Daily Summary ===
 DAILY_SUMMARY_HOUR = _env_int("DAILY_SUMMARY_HOUR", 0)
 
+# === Safety / VPS Burn-in ===
+DRY_RUN = _env_bool("DRY_RUN", True)
+DRY_RUN_STARTING_SOL = _env_float("DRY_RUN_STARTING_SOL", 25.0)
+DRY_RUN_EXECUTION_DELAY_MS = _env_int("DRY_RUN_EXECUTION_DELAY_MS", 250)
+DRY_RUN_SLIPPAGE_BPS = _env_int("DRY_RUN_SLIPPAGE_BPS", SLIPPAGE_BPS)
+HEALTH_CHECK_TIMEOUT = _env_float("HEALTH_CHECK_TIMEOUT", 8.0)
+REQUIRE_GROK = _env_bool("REQUIRE_GROK", False)
+REQUIRE_TRADING_WALLET = _env_bool("REQUIRE_TRADING_WALLET", False)
+STARTUP_HEALTHCHECK_REQUIRED = _env_bool("STARTUP_HEALTHCHECK_REQUIRED", True)
+
 
 def validate():
     errors = []
@@ -152,5 +162,28 @@ def validate():
         errors.append("MAX_POSITION_SOL must be positive")
     if BUY_SCORE_THRESHOLD < THRESHOLD_MIN:
         errors.append(f"BUY_SCORE_THRESHOLD must be >= {THRESHOLD_MIN}")
+
+    if DRY_RUN_STARTING_SOL <= 0:
+        errors.append("DRY_RUN_STARTING_SOL must be > 0")
+    if DRY_RUN_EXECUTION_DELAY_MS < 0:
+        errors.append("DRY_RUN_EXECUTION_DELAY_MS must be >= 0")
+
+    if not DRY_RUN:
+        has_encrypted = ENCRYPTION_KEY and TRADER_WALLET_KEY
+        has_raw = bool(os.getenv("TRADER_WALLET_PRIVATE_KEY", ""))
+        if not has_encrypted and not has_raw:
+            errors.append(
+                "Live trading requires a wallet: set ENCRYPTION_KEY + TRADER_WALLET_KEY "
+                "or TRADER_WALLET_PRIVATE_KEY. Set DRY_RUN=true for paper trading."
+            )
+    elif REQUIRE_TRADING_WALLET:
+        has_encrypted = ENCRYPTION_KEY and TRADER_WALLET_KEY
+        has_raw = bool(os.getenv("TRADER_WALLET_PRIVATE_KEY", ""))
+        if not has_encrypted and not has_raw:
+            errors.append("REQUIRE_TRADING_WALLET is set but no wallet configured")
+
+    if REQUIRE_GROK and not GROK_API_KEY:
+        errors.append("REQUIRE_GROK is set but GROK_API_KEY is empty")
+
     if errors:
         raise ValueError(f"Config validation failed: {'; '.join(errors)}")

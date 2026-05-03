@@ -1,9 +1,10 @@
 import asyncio
 import base64
+import json
 import logging
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -29,6 +30,8 @@ class ExecutionResult:
     sol_spent: float = 0
     entry_price: float = 0
     error: Optional[str] = None
+    simulated: bool = False
+    metadata: Optional[dict] = None
 
 
 class ExecutionEngine:
@@ -37,8 +40,31 @@ class ExecutionEngine:
         self._keypair: Optional[Keypair] = None
         self._jupiter_limiter = RateLimiter(settings.JUPITER_RATE_LIMIT)
         self._helius_limiter = RateLimiter(settings.HELIUS_RATE_LIMIT)
+        self._dexscreener_limiter = RateLimiter(settings.DEXSCREENER_RATE_LIMIT)
+        self.dry_run: bool = settings.DRY_RUN
 
     async def initialize(self):
+        self._session = create_aiohttp_session(timeout_total=settings.RPC_TIMEOUT)
+
+        if self.dry_run:
+            logger.info("DRY RUN enabled — no live trades will be sent")
+            if settings.ENCRYPTION_KEY and settings.TRADER_WALLET_KEY:
+                try:
+                    from cryptography.fernet import Fernet
+                    f = Fernet(settings.ENCRYPTION_KEY.encode())
+                    decrypted = f.decrypt(settings.TRADER_WALLET_KEY.encode())
+                    self._keypair = Keypair.from_bytes(decrypted)
+                    logger.info("wallet loaded (dry-run): %s", self._keypair.pubkey())
+                except Exception:
+                    logger.info("wallet key present but could not decrypt — continuing in dry-run without wallet")
+            elif os.getenv("TRADER_WALLET_PRIVATE_KEY", ""):
+                try:
+                    self._keypair = Keypair.from_bytes(base58.b58decode(os.getenv("TRADER_WALLET_PRIVATE_KEY", "")))
+                    logger.info("wallet loaded (dry-run): %s", self._keypair.pubkey())
+                except Exception:
+                    logger.info("raw wallet key present but invalid — continuing in dry-run without wallet")
+            return
+
         if settings.ENCRYPTION_KEY and settings.TRADER_WALLET_KEY:
             from cryptography.fernet import Fernet
             f = Fernet(settings.ENCRYPTION_KEY.encode())
@@ -52,7 +78,6 @@ class ExecutionEngine:
         if not self._keypair:
             raise ValueError("No trading wallet configured")
 
-        self._session = create_aiohttp_session(timeout_total=settings.RPC_TIMEOUT)
         logger.info("execution engine initialized, wallet=%s", self._keypair.pubkey())
 
     async def close(self):
@@ -171,6 +196,230 @@ class ExecutionEngine:
             logger.warning("honeypot check failed: %s", exc)
             return True, f"honeypot check error: {exc}"
 
+    # ── Paper balance helpers ───────────────────────────────────────────
+
+    async def get_paper_balance(self) -> float:
+        try:
+            db = await get_db()
+            try:
+                cursor = await db.execute("SELECT COALESCE(SUM(sol_delta), 0) as total FROM paper_ledger")
+                row = await cursor.fetchone()
+                delta = row["total"] if row else 0.0
+                return settings.DRY_RUN_STARTING_SOL + delta
+            finally:
+                await db.close()
+        except aiosqlite.Error as exc:
+            logger.error("paper balance query failed: %s", exc)
+            return settings.DRY_RUN_STARTING_SOL
+
+    async def reset_paper_balance(self, reason: str = "manual"):
+        db = await get_db()
+        try:
+            cursor = await db.execute("SELECT COALESCE(SUM(sol_delta), 0) as total FROM paper_ledger")
+            row = await cursor.fetchone()
+            current_delta = row["total"] if row else 0.0
+            if current_delta != 0:
+                await self._record_paper_ledger(
+                    db, event_type="RESET", sol_delta=-current_delta, reason=reason,
+                )
+            await db.commit()
+        finally:
+            await db.close()
+
+    async def _record_paper_ledger(
+        self,
+        db,
+        event_type: str,
+        sol_delta: float,
+        token_address: str = None,
+        token_symbol: str = None,
+        token_delta: float = 0,
+        simulated_price: float = None,
+        reason: str = None,
+        metadata: dict = None,
+    ):
+        await db.execute(
+            """INSERT INTO paper_ledger
+               (event_type, token_address, token_symbol, sol_delta, token_delta,
+                simulated_price, reason, metadata)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                event_type,
+                token_address,
+                token_symbol,
+                sol_delta,
+                token_delta,
+                simulated_price,
+                reason,
+                json.dumps(metadata) if metadata else None,
+            ),
+        )
+
+    # ── DexScreener price lookup ────────────────────────────────────────
+
+    async def _get_dexscreener_price(self, token_address: str) -> Optional[float]:
+        try:
+            await self._dexscreener_limiter.acquire()
+            url = f"{settings.DEXSCREENER_API_URL}/dex/tokens/{token_address}"
+            async with self._session.get(url) as resp:
+                if resp.status != 200:
+                    return None
+                data = await resp.json()
+            pairs = data.get("pairs") or []
+            if not pairs:
+                return None
+            sol_pairs = [p for p in pairs if p.get("quoteToken", {}).get("symbol", "").upper() == "SOL"]
+            target = sol_pairs[0] if sol_pairs else pairs[0]
+            price_str = target.get("priceNative") or target.get("priceUsd")
+            return float(price_str) if price_str else None
+        except Exception as exc:
+            logger.debug("dexscreener price lookup failed for %s: %s", shorten_address(token_address), exc)
+            return None
+
+    # ── Paper buy ───────────────────────────────────────────────────────
+
+    async def _paper_buy_token(
+        self, token_address: str, sol_amount: float, score: TokenScore,
+    ) -> ExecutionResult:
+        if settings.DRY_RUN_EXECUTION_DELAY_MS > 0:
+            await asyncio.sleep(settings.DRY_RUN_EXECUTION_DELAY_MS / 1000.0)
+
+        balance = await self.get_paper_balance()
+        if sol_amount > balance:
+            return ExecutionResult(
+                success=False, simulated=True,
+                error=f"paper balance insufficient: {balance:.4f} SOL < {sol_amount:.4f} SOL",
+            )
+
+        price = await self._get_dexscreener_price(token_address)
+        if price and price > 0:
+            token_amount = sol_amount / price
+            entry_price = price
+        else:
+            token_amount = sol_amount * 1_000_000
+            entry_price = sol_amount / token_amount
+
+        ts = int(time.time())
+        short_addr = token_address[:8]
+        tx_sig = f"DRYRUN_BUY_{ts}_{short_addr}"
+
+        db = await get_db()
+        try:
+            tp_price = entry_price * settings.INITIAL_TP_MULTIPLIER
+            sl_price = entry_price * (1 - settings.INITIAL_SL_PERCENT)
+
+            await db.execute(
+                """INSERT OR REPLACE INTO open_positions
+                   (token_address, token_symbol, entry_price, current_price,
+                    amount_tokens, amount_sol, peak_price, tp_price, sl_price,
+                    trail_percent, remaining_percent, dry_run, simulated_tx_signature)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1.0, 1, ?)""",
+                (
+                    token_address, score.symbol, entry_price, entry_price,
+                    token_amount, sol_amount, entry_price, tp_price, sl_price,
+                    settings.TRAILING_TP_PERCENT, tx_sig,
+                ),
+            )
+
+            await self._record_paper_ledger(
+                db,
+                event_type="BUY",
+                token_address=token_address,
+                token_symbol=score.symbol,
+                sol_delta=-sol_amount,
+                token_delta=token_amount,
+                simulated_price=entry_price,
+                reason=f"score={score.total_score}",
+                metadata={"tx_sig": tx_sig, "ape_score": score.total_score},
+            )
+
+            await db.commit()
+        finally:
+            await db.close()
+
+        logger.info(
+            "PAPER BUY token=%s symbol=%s sol=%.4f tokens=%.2f entry=%.10f sig=%s",
+            shorten_address(token_address), score.symbol, sol_amount,
+            token_amount, entry_price, tx_sig,
+        )
+
+        return ExecutionResult(
+            success=True,
+            simulated=True,
+            tx_signature=tx_sig,
+            token_amount=token_amount,
+            sol_spent=sol_amount,
+            entry_price=entry_price,
+            metadata={"dry_run": True, "paper_balance": balance - sol_amount},
+        )
+
+    # ── Paper sell ──────────────────────────────────────────────────────
+
+    async def _paper_sell_token(
+        self, token_address: str, token_amount: int, reason: str,
+    ) -> ExecutionResult:
+        if settings.DRY_RUN_EXECUTION_DELAY_MS > 0:
+            await asyncio.sleep(settings.DRY_RUN_EXECUTION_DELAY_MS / 1000.0)
+
+        price = await self._get_dexscreener_price(token_address)
+
+        if not price or price <= 0:
+            db = await get_db()
+            try:
+                cursor = await db.execute(
+                    "SELECT entry_price FROM open_positions WHERE token_address = ?",
+                    (token_address,),
+                )
+                row = await cursor.fetchone()
+                price = row["entry_price"] if row else 0.000001
+            finally:
+                await db.close()
+
+        sol_received = float(token_amount) * price if price else 0.0
+
+        ts = int(time.time())
+        short_addr = token_address[:8]
+        tx_sig = f"DRYRUN_SELL_{ts}_{short_addr}"
+
+        db = await get_db()
+        try:
+            symbol = None
+            cursor = await db.execute(
+                "SELECT token_symbol FROM open_positions WHERE token_address = ?",
+                (token_address,),
+            )
+            row = await cursor.fetchone()
+            if row:
+                symbol = row["token_symbol"]
+
+            await self._record_paper_ledger(
+                db,
+                event_type="SELL",
+                token_address=token_address,
+                token_symbol=symbol,
+                sol_delta=sol_received,
+                token_delta=-float(token_amount),
+                simulated_price=price,
+                reason=reason,
+                metadata={"tx_sig": tx_sig},
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        logger.info(
+            "PAPER SELL token=%s reason=%s sol_out=%.4f sig=%s",
+            shorten_address(token_address), reason, sol_received, tx_sig,
+        )
+
+        return ExecutionResult(
+            success=True,
+            simulated=True,
+            tx_signature=tx_sig,
+            sol_spent=sol_received,
+            metadata={"dry_run": True},
+        )
+
     # ── Jupiter V6 buy ──────────────────────────────────────────────────
 
     async def buy_token(
@@ -189,6 +438,9 @@ class ExecutionEngine:
                 success=False,
                 error=f"reentry cooldown active for {shorten_address(token_address)}",
             )
+
+        if self.dry_run:
+            return await self._paper_buy_token(token_address, sol_amount, score)
 
         is_honeypot, hp_reason = await self.check_honeypot(token_address)
         if is_honeypot:
@@ -271,6 +523,9 @@ class ExecutionEngine:
     async def sell_token(
         self, token_address: str, token_amount: int, reason: str
     ) -> ExecutionResult:
+        if self.dry_run:
+            return await self._paper_sell_token(token_address, token_amount, reason)
+
         try:
             await self._jupiter_limiter.acquire()
             quote_url = (
